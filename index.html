@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>F1 LIVE — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@300;400;500;600;700;800;900&family=Barlow:wght@300;400;500&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/dashboard.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════
+       HEADER BAR
+  ═══════════════════════════════════════════════════ -->
+  <header id="header">
+    <div class="header-left">
+      <div class="f1-logo">F1</div>
+      <div class="session-info">
+        <span id="session-name">LOADING SESSION...</span>
+        <span id="session-type-badge" class="badge badge--race">RACE</span>
+      </div>
+    </div>
+    <div class="header-center">
+      <div id="session-clock" class="session-clock">--:--:--</div>
+      <div id="lap-counter" class="lap-counter">LAP <span id="current-lap">--</span> / <span id="total-laps">--</span></div>
+    </div>
+    <div class="header-right">
+      <div id="track-status" class="track-status status--green">
+        <span class="status-dot"></span>
+        <span id="track-status-text">GREEN FLAG</span>
+      </div>
+      <div id="live-indicator" class="live-indicator">
+        <span class="live-dot"></span>LIVE
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════
+       MAIN GRID
+  ═══════════════════════════════════════════════════ -->
+  <main id="main-grid">
+
+    <!-- LEFT: Timing Tower -->
+    <section id="panel-timing" class="panel">
+      <div class="panel-header">
+        <span class="panel-title">TIMING TOWER</span>
+        <span class="panel-subtitle" id="timing-updated">–</span>
+      </div>
+      <div class="timing-columns-header">
+        <span class="tc tc--pos">POS</span>
+        <span class="tc tc--driver">DRIVER</span>
+        <span class="tc tc--tyre">TYR</span>
+        <span class="tc tc--gap">GAP</span>
+        <span class="tc tc--lap">LAST LAP</span>
+        <span class="tc tc--s1">S1</span>
+        <span class="tc tc--s2">S2</span>
+        <span class="tc tc--s3">S3</span>
+        <span class="tc tc--pits">PIT</span>
+      </div>
+      <div id="timing-list" class="timing-list">
+        <!-- Rows injected by timing.js -->
+        <div class="timing-skeleton">
+          <div class="sk-row" style="--d:0"></div>
+          <div class="sk-row" style="--d:1"></div>
+          <div class="sk-row" style="--d:2"></div>
+          <div class="sk-row" style="--d:3"></div>
+          <div class="sk-row" style="--d:4"></div>
+          <div class="sk-row" style="--d:5"></div>
+          <div class="sk-row" style="--d:6"></div>
+          <div class="sk-row" style="--d:7"></div>
+          <div class="sk-row" style="--d:8"></div>
+          <div class="sk-row" style="--d:9"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CENTER: Track Map + selected driver mini telemetry -->
+    <section id="panel-center" class="panel">
+      <div class="panel-header">
+        <span class="panel-title">TRACK MAP</span>
+        <span id="circuit-name" class="panel-subtitle">–</span>
+      </div>
+      <div id="track-map-container">
+        <canvas id="track-canvas"></canvas>
+        <div id="track-no-data" class="no-data-msg">Waiting for position data...</div>
+      </div>
+      <!-- Driver selector -->
+      <div id="driver-selector-bar">
+        <span class="ds-label">FOCUS DRIVER</span>
+        <div id="driver-chips" class="driver-chips">
+          <!-- Chips injected by state.js -->
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Telemetry -->
+    <section id="panel-telemetry" class="panel">
+      <div class="panel-header">
+        <span class="panel-title">TELEMETRY</span>
+        <div id="telem-driver-badge" class="telem-driver-badge">
+          <span id="telem-driver-color" class="telem-color-bar"></span>
+          <span id="telem-driver-acronym">---</span>
+          <span id="telem-driver-team">SELECT DRIVER</span>
+        </div>
+      </div>
+
+      <!-- Speed gauge -->
+      <div class="gauge-group">
+        <div class="gauge-label">SPEED</div>
+        <div class="gauge-bar-wrap">
+          <div class="gauge-bar" id="g-speed" style="--pct:0; --color: var(--accent-red)"></div>
+        </div>
+        <div class="gauge-value" id="gv-speed">--- <span class="gauge-unit">km/h</span></div>
+      </div>
+
+      <!-- Throttle gauge -->
+      <div class="gauge-group">
+        <div class="gauge-label">THROTTLE</div>
+        <div class="gauge-bar-wrap">
+          <div class="gauge-bar" id="g-throttle" style="--pct:0; --color: var(--accent-green)"></div>
+        </div>
+        <div class="gauge-value" id="gv-throttle">--- <span class="gauge-unit">%</span></div>
+      </div>
+
+      <!-- Brake indicator -->
+      <div class="gauge-group">
+        <div class="gauge-label">BRAKE</div>
+        <div class="gauge-bar-wrap">
+          <div class="gauge-bar" id="g-brake" style="--pct:0; --color: var(--accent-orange)"></div>
+        </div>
+        <div class="gauge-value" id="gv-brake">--- <span class="gauge-unit">%</span></div>
+      </div>
+
+      <!-- RPM -->
+      <div class="gauge-group">
+        <div class="gauge-label">RPM</div>
+        <div class="gauge-bar-wrap">
+          <div class="gauge-bar" id="g-rpm" style="--pct:0; --color: var(--accent-yellow)"></div>
+        </div>
+        <div class="gauge-value" id="gv-rpm">--,--- <span class="gauge-unit">rpm</span></div>
+      </div>
+
+      <!-- Gear + DRS row -->
+      <div class="gear-drs-row">
+        <div class="gear-display">
+          <div class="gear-label">GEAR</div>
+          <div id="gear-value" class="gear-value">–</div>
+        </div>
+        <div id="drs-indicator" class="drs-indicator drs--off">
+          <div class="drs-label">DRS</div>
+          <div class="drs-status">OFF</div>
+        </div>
+      </div>
+
+      <!-- Current stint info -->
+      <div class="stint-info-box">
+        <div class="stint-row">
+          <div class="stint-item">
+            <span class="stint-label">COMPOUND</span>
+            <span id="tyre-compound" class="tyre-badge tyre--unknown">–</span>
+          </div>
+          <div class="stint-item">
+            <span class="stint-label">TYRE AGE</span>
+            <span id="tyre-age" class="stint-value">– laps</span>
+          </div>
+          <div class="stint-item">
+            <span class="stint-label">STINT</span>
+            <span id="stint-number" class="stint-value">#–</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Last 5 lap times mini chart -->
+      <div class="lap-history-box">
+        <div class="lap-history-label">LAST LAPS</div>
+        <div id="lap-history-bars" class="lap-history-bars">
+          <div class="lh-placeholder">No data</div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════════════
+       BOTTOM BAR: Race Control + Weather
+  ═══════════════════════════════════════════════════ -->
+  <footer id="bottom-bar">
+
+    <!-- Race Control Messages -->
+    <div id="race-control-panel" class="rc-panel">
+      <div class="rc-header">RACE CONTROL</div>
+      <div id="rc-messages" class="rc-messages">
+        <div class="rc-msg rc-msg--system">
+          <span class="rc-time">--:--</span>
+          <span class="rc-text">Waiting for session data...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Weather Strip -->
+    <div id="weather-strip" class="weather-strip">
+      <div class="wx-item">
+        <span class="wx-label">TRACK</span>
+        <span id="wx-track-temp" class="wx-value">--°C</span>
+      </div>
+      <div class="wx-divider"></div>
+      <div class="wx-item">
+        <span class="wx-label">AIR</span>
+        <span id="wx-air-temp" class="wx-value">--°C</span>
+      </div>
+      <div class="wx-divider"></div>
+      <div class="wx-item">
+        <span class="wx-label">HUM</span>
+        <span id="wx-humidity" class="wx-value">--%</span>
+      </div>
+      <div class="wx-divider"></div>
+      <div class="wx-item">
+        <span class="wx-label">WIND</span>
+        <span id="wx-wind" class="wx-value">-- m/s</span>
+      </div>
+      <div class="wx-divider"></div>
+      <div class="wx-item">
+        <span class="wx-label">RAIN</span>
+        <span id="wx-rain" class="wx-value wx-rain--no">NO</span>
+      </div>
+    </div>
+
+  </footer>
+
+  <!-- ═══════════════════════════════════════════════════
+       FLAG FLASH OVERLAY (SC, RED FLAG etc)
+  ═══════════════════════════════════════════════════ -->
+  <div id="flag-overlay" class="flag-overlay flag-overlay--hidden">
+    <div class="flag-text" id="flag-overlay-text">SAFETY CAR</div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/state.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/timing.js"></script>
+  <script src="js/trackmap.js"></script>
+  <script src="js/telemetry.js"></script>
+  <script src="js/racecontrol.js"></script>
+  <script src="js/weather.js"></script>
+  <script src="js/main.js"></script>
+
+</body>
+</html>
