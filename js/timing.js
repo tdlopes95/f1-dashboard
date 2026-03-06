@@ -54,6 +54,18 @@ const Timing = (() => {
     return t.includes('qualifying') || t.includes('quali');
   }
 
+  function isPractice() {
+    const t = (State.get('sessionType') || '').toLowerCase();
+    return t.includes('practice');
+  }
+
+  function getPracticeNumber() {
+    const name = (State.get('sessionName') || '').toUpperCase();
+    if (name.includes('3')) return 'FP3';
+    if (name.includes('2')) return 'FP2';
+    return 'FP1';
+  }
+
   function getQualiPhase() {
     const name = (State.get('sessionName') || '').toUpperCase();
     if (name.includes('Q3')) return 'Q3';
@@ -99,7 +111,32 @@ const Timing = (() => {
   // ── Swap header columns based on session type ────────
   function updateHeader() {
     if (!headerEl) return;
-    if (isQuali()) {
+    if (isPractice()) {
+      const bestLaps    = getBestLaps();
+      const overallBest = getOverallBest(bestLaps);
+      const fp          = getPracticeNumber();
+
+      const sorted = [...drivers].sort((a, b) => {
+        const ta = bestLaps[a.driver_number]?.lap_duration ?? Infinity;
+        const tb = bestLaps[b.driver_number]?.lap_duration ?? Infinity;
+        return ta - tb;
+      });
+
+      // Practice banner
+      const banner = document.createElement('div');
+      banner.className = 'quali-phase-banner practice-banner';
+      banner.innerHTML = `
+        <span class="qpb-phase">${fp}</span>
+        <span class="qpb-label">FREE PRACTICE</span>
+        ${overallBest ? `<span class="qpb-best">BEST: ${formatTime(overallBest)}</span>` : '<span class="qpb-best">NO TIMES YET</span>'}
+      `;
+      listEl.appendChild(banner);
+
+      sorted.forEach((d, i) => {
+        listEl.appendChild(buildPracticeRow(d, i + 1, bestLaps, overallBest));
+      });
+
+    } else if (isQuali()) {
       headerEl.innerHTML = `
         <span class="tc tc--pos">POS</span>
         <span class="tc tc--driver">DRIVER</span>
@@ -226,6 +263,54 @@ const Timing = (() => {
     return row;
   }
 
+  // ── PRACTICE row ─────────────────────────────────────
+  function buildPracticeRow(driver, pos, bestLaps, overallBest) {
+    const num     = driver.driver_number;
+    const focused = State.get('focusedDriver') === num;
+    const best    = bestLaps[num];
+    const stint   = State.raw.stints[num];
+    const compound= stint?.compound || null;
+    const allLaps = State.raw.allLaps[num] || [];
+    const lapCount= allLaps.length;
+
+    const posClass = pos === 1 ? 'pos-1' : pos === 2 ? 'pos-2' : pos === 3 ? 'pos-3' : '';
+
+    // Gap to P1
+    let gapHtml = '–';
+    if (pos === 1)              gapHtml = '<span class="q-pole">P1</span>';
+    else if (best && overallBest) gapHtml = `+${(best.lap_duration - overallBest).toFixed(3)}`;
+
+    // Improvement flash — was last lap a new best?
+    const lastLap = State.raw.lastLaps[num];
+    const improved = best && lastLap && lastLap.lap_duration === best.lap_duration;
+
+    const row = document.createElement('div');
+    row.className = 'timing-row timing-row--practice' + (focused ? ' is-focused' : '');
+    row.dataset.driver = num;
+
+    row.innerHTML = `
+      <span class="tr-pos ${posClass}">${pos}</span>
+      <span class="tr-driver">
+        <span class="tr-acronym">
+          <span class="tr-color-bar" style="background:#${driver.team_colour||'fff'}"></span>${driver.name_acronym || num}
+        </span>
+        <span class="tr-team">${driver.team_name || ''}</span>
+      </span>
+      <span class="tr-tyre">
+        <span class="tyre-dot ${getTyreClass(compound)}">${getTyreLetter(compound)}</span>
+      </span>
+      <span class="tr-lap${improved ? ' tr-lap--improved' : ''}">${best ? formatTime(best.lap_duration) : '–'}</span>
+      <span class="tr-gap">${gapHtml}</span>
+      <span class="tr-s1">${best?.duration_sector_1 ? formatTime(best.duration_sector_1) : '–'}</span>
+      <span class="tr-s2">${best?.duration_sector_2 ? formatTime(best.duration_sector_2) : '–'}</span>
+      <span class="tr-s3">${best?.duration_sector_3 ? formatTime(best.duration_sector_3) : '–'}</span>
+      <span class="tr-pits">${lapCount || '–'}</span>
+    `;
+
+    row.addEventListener('click', () => { State.setFocusedDriver(num); render(); });
+    return row;
+  }
+
   // ── QUALIFYING row ───────────────────────────────────
   function buildQualiRow(driver, pos, bestLaps, overallBest, phase) {
     const num     = driver.driver_number;
@@ -311,7 +396,32 @@ const Timing = (() => {
     updateHeader();
     listEl.innerHTML = '';
 
-    if (isQuali()) {
+    if (isPractice()) {
+      const bestLaps    = getBestLaps();
+      const overallBest = getOverallBest(bestLaps);
+      const fp          = getPracticeNumber();
+
+      const sorted = [...drivers].sort((a, b) => {
+        const ta = bestLaps[a.driver_number]?.lap_duration ?? Infinity;
+        const tb = bestLaps[b.driver_number]?.lap_duration ?? Infinity;
+        return ta - tb;
+      });
+
+      // Practice banner
+      const banner = document.createElement('div');
+      banner.className = 'quali-phase-banner practice-banner';
+      banner.innerHTML = `
+        <span class="qpb-phase">${fp}</span>
+        <span class="qpb-label">FREE PRACTICE</span>
+        ${overallBest ? `<span class="qpb-best">BEST: ${formatTime(overallBest)}</span>` : '<span class="qpb-best">NO TIMES YET</span>'}
+      `;
+      listEl.appendChild(banner);
+
+      sorted.forEach((d, i) => {
+        listEl.appendChild(buildPracticeRow(d, i + 1, bestLaps, overallBest));
+      });
+
+    } else if (isQuali()) {
       const phase       = getQualiPhase();
       const bestLaps    = getBestLaps();
       const overallBest = getOverallBest(bestLaps);

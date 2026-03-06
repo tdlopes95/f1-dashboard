@@ -26,6 +26,7 @@
   setInterval(updateClock, 1000);
 
   // ── Init all components ──────────────────────────────
+  EventTimer.init();
   TeamRadio.init();
   SessionPicker.init();
   Timing.init();

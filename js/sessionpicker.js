@@ -21,6 +21,43 @@ const SessionPicker = (() => {
   let _selectedMeetingKey = null;
   let _isLive = true;
 
+
+  // ── ISO 3→2 country code map ─────────────────────────
+  const ISO3TO2 = {
+    ABH:'ab',ARG:'ar',AUS:'au',AUT:'at',AZE:'az',
+    BAH:'bh',BEL:'be',BRA:'br',CAN:'ca',CHN:'cn',
+    ESP:'es',FRA:'fr',GBR:'gb',HUN:'hu',ITA:'it',
+    JPN:'jp',KSA:'sa',MEX:'mx',MON:'mc',NED:'nl',
+    POR:'pt',QAT:'qa',RSM:'sm',SGP:'sg',SUI:'ch',
+    TUR:'tr',UAE:'ae',USA:'us',VIE:'vn',ZAF:'za',
+  };
+  function iso2(code3) {
+    return (ISO3TO2[code3?.toUpperCase()] || code3?.toLowerCase().slice(0,2) || 'un');
+  }
+
+
+  // ── Jolpica API (historical data) ───────────────────
+  const JOLPICA = 'https://api.jolpi.ca/ergast/f1';
+
+  async function jolpikaFetch(path) {
+    try {
+      const res = await fetch(`${JOLPICA}${path}.json?limit=100`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      return json?.MRData || null;
+    } catch (e) {
+      console.warn('[Jolpica]', path, e.message);
+      return null;
+    }
+  }
+
+  // Fetch last N completed race rounds for a year
+  async function jolpikaRaces(year) {
+    const data = await jolpikaFetch(`/${year}/races`);
+    if (!data?.RaceTable?.Races) return [];
+    return data.RaceTable.Races;
+  }
+
   // ── Open / close ─────────────────────────────────────
   function open() {
     modal.classList.remove('sp-modal--hidden');
@@ -34,54 +71,124 @@ const SessionPicker = (() => {
   }
 
   // ── Fetch meetings for a year ────────────────────────
+  // Uses Jolpica for completed past sessions (richer/faster)
+  // Falls back to OpenF1 for current year upcoming rounds
+  const MAX_PAST_SESSIONS = 10;
+
   async function loadMeetings(year) {
     meetingsList.innerHTML = '<div class="sp-loading">Loading...</div>';
     sessionsList.innerHTML = '<div class="sp-hint">← Select a Grand Prix</div>';
     _selectedMeetingKey = null;
 
-    const data = await API.fetchJSON('meetings', { year });
-    if (!data?.length) {
-      meetingsList.innerHTML = '<div class="sp-empty">No meetings found</div>';
+    const currentYear = new Date().getFullYear();
+    const isPastYear  = parseInt(year) < currentYear;
+
+    // For past years — use Jolpica, limit to 10 most recent
+    if (isPastYear) {
+      const races = await jolpikaRaces(year);
+      if (!races.length) {
+        meetingsList.innerHTML = '<div class="sp-empty">No data for this year</div>';
+        return;
+      }
+      // Jolpica is chronological, we want most recent first, last 10 only
+      const recent = [...races].reverse().slice(0, MAX_PAST_SESSIONS);
+      meetingsList.innerHTML = '';
+      renderMeetingItems(recent.map(r => ({
+        key:      r.round,
+        name:     r.raceName.replace(' Grand Prix','').replace('Grand Prix','').trim(),
+        fullName: r.raceName,
+        circuit:  r.Circuit.circuitName,
+        country:  r.Circuit.Location.country,
+        date:     r.date,
+        round:    r.round,
+        season:   r.season,
+        isJolpika: true,
+        jolpikaRound: r.round,
+      })));
       return;
     }
 
-    // Sort chronologically (most recent first)
-    const sorted = [...data].sort((a, b) =>
-      new Date(b.date_start) - new Date(a.date_start)
-    );
+    // Current year — use OpenF1 (has upcoming rounds too)
+    const data = await API.fetchJSON('meetings', { year });
+    if (!data?.length) {
+      meetingsList.innerHTML = '<div class="sp-empty">No data available yet</div>';
+      return;
+    }
+
+    const sorted = [...data].sort((a, b) => new Date(b.date_start) - new Date(a.date_start));
+    // Past meetings: last 10 + upcoming ones
+    const past     = sorted.filter(m => new Date(m.date_start) <= new Date()).slice(0, MAX_PAST_SESSIONS);
+    const upcoming = sorted.filter(m => new Date(m.date_start) > new Date());
+    const display  = [...upcoming, ...past];
 
     meetingsList.innerHTML = '';
-    sorted.forEach(m => {
-      const isUpcoming = new Date(m.date_start) > new Date();
+    renderMeetingItems(display.map(m => ({
+      key:          m.meeting_key,
+      name:         m.meeting_name.replace(' Grand Prix','').replace('Grand Prix','').trim(),
+      fullName:     m.meeting_name,
+      circuit:      m.circuit_short_name,
+      country:      m.country_code,
+      date:         m.date_start,
+      isUpcoming:   new Date(m.date_start) > new Date(),
+      isJolpika:    false,
+      openf1Key:    m.meeting_key,
+    })));
+  }
+
+  function renderMeetingItems(meetings) {
+    meetings.forEach(m => {
+      const isUpcoming = m.isUpcoming || false;
       const item = document.createElement('div');
       item.className = 'sp-meeting-item' + (isUpcoming ? ' sp-upcoming' : '');
-      item.dataset.meetingKey = m.meeting_key;
+      item.dataset.meetingKey = m.key;
 
-      const dateStr = new Date(m.date_start).toLocaleDateString('en-GB', {
-        day: 'numeric', month: 'short'
-      });
+      const dateStr = new Date(m.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      const flagCode = m.isJolpika
+        ? countryNameToIso2(m.country)
+        : iso2(m.country);
 
       item.innerHTML = `
         <span class="sp-meeting-flag">
-          ${m.country_code ? `<img src="https://flagcdn.com/16x12/${m.country_code.toLowerCase().slice(0,2)}.png"
-            onerror="this.style.display='none'" alt="" />` : ''}
+          <img src="https://flagcdn.com/16x12/${flagCode}.png"
+            onerror="this.style.display='none'" alt="" />
         </span>
         <span class="sp-meeting-info">
-          <span class="sp-meeting-name">${m.meeting_name.replace(' Grand Prix','').replace('Grand Prix','').trim()}</span>
-          <span class="sp-meeting-circuit">${m.circuit_short_name}</span>
+          <span class="sp-meeting-name">${m.name}</span>
+          <span class="sp-meeting-circuit">${m.circuit}</span>
         </span>
         <span class="sp-meeting-date">${dateStr}</span>
         ${isUpcoming ? '<span class="sp-upcoming-badge">UPCOMING</span>' : ''}
+        ${m.isJolpika ? '<span class="sp-source-badge">HIS</span>' : ''}
       `;
 
-      item.addEventListener('click', () => {
-        document.querySelectorAll('.sp-meeting-item').forEach(el => el.classList.remove('active'));
-        item.classList.add('active');
-        loadSessionsForMeeting(m.meeting_key, m.meeting_name);
-      });
-
+      if (!isUpcoming) {
+        item.addEventListener('click', () => {
+          document.querySelectorAll('.sp-meeting-item').forEach(el => el.classList.remove('active'));
+          item.classList.add('active');
+          if (m.isJolpika) {
+            loadSessionsJolpika(m.season, m.jolpikaRound, m.fullName);
+          } else {
+            loadSessionsForMeeting(m.openf1Key, m.fullName);
+          }
+        });
+      }
       meetingsList.appendChild(item);
     });
+  }
+
+  // Country name → 2-letter ISO (for Jolpika which gives full country name)
+  const COUNTRY_NAME_TO_ISO2 = {
+    'Australia':'au','Bahrain':'bh','Saudi Arabia':'sa','Japan':'jp',
+    'China':'cn','United States':'us','USA':'us','Miami':'us',
+    'Italy':'it','Monaco':'mc','Canada':'ca','Spain':'es',
+    'Austria':'at','Great Britain':'gb','United Kingdom':'gb',
+    'Hungary':'hu','Belgium':'be','Netherlands':'nl','Singapore':'sg',
+    'Mexico':'mx','Brazil':'br','Las Vegas':'us','Qatar':'qa',
+    'Abu Dhabi':'ae','Azerbaijan':'az','France':'fr','Portugal':'pt',
+    'Turkey':'tr','Russia':'ru','Germany':'de','Argentina':'ar',
+  };
+  function countryNameToIso2(name) {
+    return COUNTRY_NAME_TO_ISO2[name] || name?.toLowerCase().slice(0,2) || 'un';
   }
 
   // ── Fetch sessions for a meeting ─────────────────────
@@ -143,6 +250,66 @@ const SessionPicker = (() => {
     });
   }
 
+
+  // ── Load sessions for a Jolpika (past) meeting ──────
+  async function loadSessionsJolpika(season, round, meetingName) {
+    sessionsList.innerHTML = '<div class="sp-loading">Loading sessions...</div>';
+
+    // Jolpika: we know the structure — each race weekend has fixed sessions
+    // Fetch race result to confirm it exists, then build session list
+    const raceData = await jolpikaFetch(`/${season}/${round}/results`);
+    const qualData = await jolpikaFetch(`/${season}/${round}/qualifying`);
+
+    sessionsList.innerHTML = `<div class="sp-sessions-gp-name">${meetingName}</div>`;
+
+    // Build synthetic session list from known weekend structure
+    // We'll load them via OpenF1 when clicked (using meeting lookup)
+    // But display via Jolpika data availability
+    const race = raceData?.RaceTable?.Races?.[0];
+    const qual  = qualData?.RaceTable?.Races?.[0];
+
+    if (!race) {
+      sessionsList.innerHTML += '<div class="sp-empty">Session data unavailable</div>';
+      return;
+    }
+
+    // Find the OpenF1 meeting key for this race to load actual data
+    const openf1Meetings = await API.fetchJSON('meetings', { year: season, meeting_name: race.raceName }) ||
+                           await API.fetchJSON('meetings', { year: season });
+
+    const matched = openf1Meetings?.find(m =>
+      m.meeting_name?.toLowerCase().includes(race.Circuit?.Location?.country?.toLowerCase()) ||
+      m.location?.toLowerCase().includes(race.Circuit?.Location?.locality?.toLowerCase())
+    );
+
+    const sessions = [
+      { name: 'Practice 1',   type: 'Practice',    available: true },
+      { name: 'Practice 2',   type: 'Practice',    available: true },
+      { name: 'Practice 3',   type: 'Practice',    available: true },
+      { name: 'Qualifying',   type: 'Qualifying',  available: !!qual },
+      { name: 'Race',         type: 'Race',        available: !!race },
+    ];
+
+    if (matched) {
+      // Load actual OpenF1 sessions for this meeting
+      loadSessionsForMeeting(matched.meeting_key, race.raceName);
+    } else {
+      // Fallback: show what Jolpika knows, note OpenF1 data may be limited
+      sessions.forEach(s => {
+        const item = document.createElement('div');
+        item.className = 'sp-session-item' + (!s.available ? ' sp-session-item--upcoming' : '');
+        item.innerHTML = `
+          <span class="sp-session-type-badge ${getTypeBadgeClass(s.type)}">${s.name}</span>
+          <span class="sp-session-meta">
+            <span class="sp-session-date">${race.date}</span>
+          </span>
+          <span class="sp-source-badge">HIS</span>
+        `;
+        sessionsList.appendChild(item);
+      });
+    }
+  }
+
   function getTypeBadgeClass(type) {
     const t = (type || '').toLowerCase();
     if (t.includes('race'))     return 'badge--race';
@@ -179,7 +346,7 @@ const SessionPicker = (() => {
     State.set('sessionStartTime', session.date_start);
 
     // Update header display
-    document.getElementById('session-name').textContent = `${session.location} — ${session.session_name}`;
+    document.getElementById('session-name').textContent = `${session.location || session.circuit_short_name} — ${session.session_name}`;
     document.getElementById('circuit-name').textContent = session.circuit_short_name;
 
     const badge = document.getElementById('session-type-badge');

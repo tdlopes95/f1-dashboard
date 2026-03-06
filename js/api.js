@@ -41,12 +41,38 @@ const API = (() => {
     if (!sessions?.length) return;
     const s = sessions[0];
 
-    State.set('sessionKey',  s.session_key);
-    State.set('meetingKey',  s.meeting_key);
-    State.set('sessionName', `${s.location} — ${s.session_name}`);
-    State.set('sessionType', s.session_type);
-    State.set('circuitName', s.circuit_short_name);
-    State.set('sessionStartTime', s.date_start);
+    State.set('sessionKey',      s.session_key);
+    State.set('meetingKey',      s.meeting_key);
+    State.set('sessionName',     `${s.location} — ${s.session_name}`);
+    State.set('sessionType',     s.session_type);
+    State.set('circuitName',     s.circuit_short_name);
+    State.set('sessionStartTime',s.date_start);
+    State.set('sessionEndTime',  s.date_end);
+
+    // Determine if live: started and not yet ended
+    const now     = new Date();
+    const started = new Date(s.date_start) <= now;
+    const ended   = s.date_end && new Date(s.date_end) < now;
+    State.set('sessionIsLive', started && !ended);
+
+    // Fetch next upcoming session for the countdown
+    if (!started || ended) {
+      const upcoming = await fetchJSON('sessions', { session_key: 'next' }).catch(() => null);
+      if (upcoming?.length) {
+        State.set('nextSessionName',  `${upcoming[0].location} — ${upcoming[0].session_name}`);
+        State.set('nextSessionStart', upcoming[0].date_start);
+      } else {
+        // fallback: look at all sessions for this meeting
+        const all = await fetchJSON('sessions', { meeting_key: s.meeting_key }).catch(() => null);
+        const future = (all || [])
+          .filter(x => new Date(x.date_start) > now)
+          .sort((a,b) => new Date(a.date_start) - new Date(b.date_start));
+        if (future.length) {
+          State.set('nextSessionName',  `${future[0].location} — ${future[0].session_name}`);
+          State.set('nextSessionStart', future[0].date_start);
+        }
+      }
+    }
 
     document.getElementById('session-name').textContent = State.get('sessionName') || '–';
     document.getElementById('circuit-name').textContent = State.get('circuitName') || '–';
@@ -307,13 +333,21 @@ const API = (() => {
 
     (async () => {
       await loadSession();
+
+      // If no live session, hand off to EventTimer — don't start polls
+      if (!State.get('sessionIsLive')) {
+        console.log('[API] No live session — polling suppressed');
+        _running = false;
+        return;
+      }
+
       await loadDrivers();
       await pollLaps();
       await pollStints();
       await pollPits();
       await pollWeather();
 
-      // Fast polls
+      // Fast polls (live data only)
       scheduleRepeat(pollPositions,   INTERVALS.fast,   'positions');
       scheduleRepeat(pollIntervals,   INTERVALS.fast,   'intervals');
       scheduleRepeat(pollCarData,     INTERVALS.fast,   'carData');
@@ -330,7 +364,7 @@ const API = (() => {
       // Slow polls
       scheduleRepeat(pollWeather,     INTERVALS.slow,   'weather');
 
-      console.log('[API] All pollers started');
+      console.log('[API] All pollers started — session is live');
     })();
   }
 
@@ -446,6 +480,7 @@ const API = (() => {
     console.log('[API] Historical load complete');
   }
 
-  return { start, stop, fetchJSON, loadHistorical };
+  function isSessionLive() { return !!State.get('sessionIsLive'); }
+  return { start, stop, fetchJSON, loadHistorical, isSessionLive };
 
 })();

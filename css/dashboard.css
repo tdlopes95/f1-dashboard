@@ -216,7 +216,7 @@ body::before {
   left: 0; right: 0;
   bottom: var(--footer-h);
   display: grid;
-  grid-template-columns: 480px 1fr 280px;
+  grid-template-columns: 480px 1fr 340px;
   grid-template-rows: 1fr;
   gap: 1px;
   background: var(--border);
@@ -832,7 +832,7 @@ body::before {
 
 /* Weather Strip */
 .weather-strip {
-  width: 280px;
+  width: 340px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -1782,4 +1782,156 @@ body::before {
   border: 1px solid var(--accent-orange);
   padding: 1px 3px;
   border-radius: 1px;
+}
+
+.sp-source-badge {
+  font-family: var(--font-display);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--accent-blue);
+  border: 1px solid rgba(0,170,255,0.3);
+  padding: 1px 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* ── Practice mode banner tint ───────────────────────── */
+.practice-banner {
+  background: linear-gradient(90deg, rgba(0,170,255,0.1), transparent);
+  border-left-color: var(--accent-blue);
+}
+.practice-banner .qpb-phase { color: var(--accent-blue); }
+
+/* ═══════════════════════════════════════════════════════
+   EVENT TIMER OVERLAY
+═══════════════════════════════════════════════════════ */
+
+.et-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.88);
+  backdrop-filter: blur(6px);
+  animation: et-fadein 0.4s ease-out;
+}
+.et-overlay--hidden { display: none !important; }
+
+@keyframes et-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.et-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  padding: 48px 64px;
+  border: 1px solid var(--border-bright);
+  border-top: 3px solid var(--accent-red);
+  background: #0e0e0e;
+  border-radius: 2px;
+  box-shadow: 0 32px 80px rgba(0,0,0,0.7);
+  min-width: 400px;
+}
+
+.et-logo {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 40px;
+  color: var(--accent-red);
+  letter-spacing: -2px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.et-status {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: var(--text-secondary);
+}
+
+.et-session-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 1px;
+  color: var(--text-primary);
+  margin: 4px 0;
+}
+
+.et-countdown-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: var(--text-dim);
+  margin-top: 12px;
+}
+
+.et-countdown {
+  font-family: var(--font-mono);
+  font-size: 52px;
+  color: var(--text-primary);
+  letter-spacing: 4px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.et-sub {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.et-actions { margin-top: 16px; }
+
+.et-browse-btn {
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 2px;
+  padding: 8px 20px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.et-browse-btn:hover {
+  border-color: var(--accent-red);
+  color: var(--text-primary);
+  background: rgba(232,0,45,0.08);
+}
+
+/* Animated waiting dots */
+.et-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: 20px;
+}
+.et-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-red);
+  opacity: 0.3;
+  animation: et-dot-pulse 1.4s ease-in-out infinite;
+}
+.et-dot:nth-child(2) { animation-delay: 0.2s; }
+.et-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes et-dot-pulse {
+  0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+  40%           { opacity: 1;   transform: scale(1.2); }
 }
