@@ -269,6 +269,31 @@ const API = (() => {
     State.set('weather', latest);
   }
 
+
+  // ── Team radio ───────────────────────────────────────
+  let _lastRadioDate = null;
+
+  async function pollTeamRadio() {
+    const sk = State.get('sessionKey');
+    const params = { session_key: sk };
+    if (_lastRadioDate) params['date>'] = _lastRadioDate;
+
+    const data = await fetchJSON('team_radio', params);
+    if (!data?.length) return;
+
+    data.forEach(clip => {
+      // Only emit truly new clips (not on first load dump)
+      const isNew = _lastRadioDate !== null;
+      _lastRadioDate = clip.date;
+      if (isNew) State.emit('newRadioClip', clip);
+    });
+
+    // On first load, just set the date watermark silently
+    if (!_lastRadioDate && data.length) {
+      _lastRadioDate = data[data.length - 1].date;
+    }
+  }
+
   // ── Scheduler ────────────────────────────────────────
 
   function scheduleRepeat(fn, interval, name) {
@@ -300,6 +325,7 @@ const API = (() => {
       scheduleRepeat(pollStints,      INTERVALS.medium, 'stints');
       scheduleRepeat(pollPits,        INTERVALS.medium, 'pits');
       scheduleRepeat(pollOvertakes,   INTERVALS.medium, 'overtakes');
+      scheduleRepeat(pollTeamRadio,   INTERVALS.medium, 'teamRadio');
 
       // Slow polls
       scheduleRepeat(pollWeather,     INTERVALS.slow,   'weather');

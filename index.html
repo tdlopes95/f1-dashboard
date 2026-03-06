@@ -175,12 +175,15 @@
         </div>
       </div>
 
-      <!-- Last 5 lap times mini chart -->
+      <!-- Lap delta sparkline -->
       <div class="lap-history-box">
-        <div class="lap-history-label">LAST LAPS</div>
-        <div id="lap-history-bars" class="lap-history-bars">
-          <div class="lh-placeholder">No data</div>
+        <div class="lap-history-header">
+          <span class="lap-history-label">LAP HISTORY</span>
+          <span id="sparkline-best-label" class="sparkline-best-label"></span>
         </div>
+        <canvas id="sparkline-canvas" class="sparkline-canvas"></canvas>
+        <div id="sparkline-tooltip" class="sparkline-tooltip sparkline-tooltip--hidden"></div>
+        <div id="sparkline-empty" class="lh-placeholder">Select a driver</div>
       </div>
     </section>
 
@@ -253,10 +256,11 @@
         </div>
         <div class="sp-controls">
           <select id="sp-year-select" class="sp-select">
-            <option value="2025">2025</option>
-            <option value="2024">2024</option>
-            <option value="2023">2023</option>
+            <option value="2025">2025 Season</option>
+            <option value="2024">2024 Season</option>
+            <option value="2023">2023 Season</option>
           </select>
+          <span class="sp-data-note">data: openf1.org</span>
           <button id="sp-close-btn" class="sp-close-btn">✕</button>
         </div>
       </div>
@@ -296,6 +300,7 @@
   <script src="js/telemetry.js"></script>
   <script src="js/racecontrol.js"></script>
   <script src="js/weather.js"></script>
+  <script src="js/teamradio.js"></script>
   <script src="js/sessionpicker.js"></script>
   <script src="js/main.js"></script>
 

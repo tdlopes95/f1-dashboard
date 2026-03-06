@@ -26,6 +26,7 @@
   setInterval(updateClock, 1000);
 
   // ── Init all components ──────────────────────────────
+  TeamRadio.init();
   SessionPicker.init();
   Timing.init();
   TrackMap.init();
