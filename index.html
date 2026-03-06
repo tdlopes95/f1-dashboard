@@ -30,6 +30,10 @@
         <span class="status-dot"></span>
         <span id="track-status-text">GREEN FLAG</span>
       </div>
+      <button id="session-picker-btn" class="session-picker-btn" title="Browse sessions">
+        <span class="sp-btn-icon">⊞</span>
+        <span class="sp-btn-label">SESSIONS</span>
+      </button>
       <div id="live-indicator" class="live-indicator">
         <span class="live-dot"></span>LIVE
       </div>
@@ -47,7 +51,7 @@
         <span class="panel-title">TIMING TOWER</span>
         <span class="panel-subtitle" id="timing-updated">–</span>
       </div>
-      <div class="timing-columns-header">
+      <div class="timing-columns-header" id="timing-columns-header">
         <span class="tc tc--pos">POS</span>
         <span class="tc tc--driver">DRIVER</span>
         <span class="tc tc--tyre">TYR</span>
@@ -235,6 +239,55 @@
     <div class="flag-text" id="flag-overlay-text">SAFETY CAR</div>
   </div>
 
+
+  <!-- ═══════════════════════════════════════════════════
+       SESSION PICKER MODAL
+  ═══════════════════════════════════════════════════ -->
+  <div id="session-picker-modal" class="sp-modal sp-modal--hidden">
+    <div class="sp-backdrop"></div>
+    <div class="sp-panel">
+      <div class="sp-header">
+        <div class="sp-title">
+          <span class="sp-title-f1">F1</span>
+          <span class="sp-title-label">SESSION BROWSER</span>
+        </div>
+        <div class="sp-controls">
+          <select id="sp-year-select" class="sp-select">
+            <option value="2025">2025</option>
+            <option value="2024">2024</option>
+            <option value="2023">2023</option>
+          </select>
+          <button id="sp-close-btn" class="sp-close-btn">✕</button>
+        </div>
+      </div>
+
+      <div class="sp-body">
+        <!-- Meeting list (left) -->
+        <div class="sp-meetings-col">
+          <div class="sp-col-header">GRANDS PRIX</div>
+          <div id="sp-meetings-list" class="sp-meetings-list">
+            <div class="sp-loading">Loading calendar...</div>
+          </div>
+        </div>
+
+        <!-- Session list (right) -->
+        <div class="sp-sessions-col">
+          <div class="sp-col-header">SESSIONS</div>
+          <div id="sp-sessions-list" class="sp-sessions-list">
+            <div class="sp-hint">← Select a Grand Prix</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer: currently loaded session info -->
+      <div class="sp-footer">
+        <span class="sp-footer-label">CURRENTLY VIEWING</span>
+        <span id="sp-current-label" class="sp-current-label">LIVE — latest session</span>
+        <button id="sp-live-btn" class="sp-live-btn">↩ BACK TO LIVE</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Scripts -->
   <script src="js/state.js"></script>
   <script src="js/api.js"></script>
@@ -243,6 +296,7 @@
   <script src="js/telemetry.js"></script>
   <script src="js/racecontrol.js"></script>
   <script src="js/weather.js"></script>
+  <script src="js/sessionpicker.js"></script>
   <script src="js/main.js"></script>
 
 </body>

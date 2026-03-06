@@ -314,6 +314,112 @@ const API = (() => {
     _running = false;
   }
 
-  return { start, stop, fetchJSON };
+
+  // ── Historical load (past sessions — fetch once, no polling) ──
+  async function loadHistorical(sessionKey) {
+    console.log('[API] Loading historical session:', sessionKey);
+
+    // Load in parallel where possible
+    const [drivers, laps, stints, pits, positions, rc, weather] = await Promise.all([
+      fetchJSON('drivers',      { session_key: sessionKey }),
+      fetchJSON('laps',         { session_key: sessionKey }),
+      fetchJSON('stints',       { session_key: sessionKey }),
+      fetchJSON('pit',          { session_key: sessionKey }),
+      fetchJSON('position',     { session_key: sessionKey }),
+      fetchJSON('race_control', { session_key: sessionKey }),
+      fetchJSON('weather',      { session_key: sessionKey }),
+    ]);
+
+    // Drivers
+    if (drivers?.length) {
+      drivers.forEach(d => {
+        State.setDriver(d.driver_number, {
+          driver_number: d.driver_number,
+          name_acronym:  d.name_acronym,
+          full_name:     d.full_name,
+          team_name:     d.team_name,
+          team_colour:   d.team_colour || 'FFFFFF',
+          headshot_url:  d.headshot_url,
+        });
+      });
+      State.emit('driversLoaded', State.raw.drivers);
+    }
+
+    // Positions — keep only final position per driver
+    if (positions?.length) {
+      const finalPos = {};
+      positions.forEach(p => {
+        if (!finalPos[p.driver_number] || new Date(p.date) > new Date(finalPos[p.driver_number].date)) {
+          finalPos[p.driver_number] = p;
+        }
+      });
+      const posMap = {};
+      Object.values(finalPos).forEach(p => {
+        posMap[p.driver_number] = { position: p.position, date: p.date };
+      });
+      State.merge('positions', posMap);
+    }
+
+    // Laps — all laps + last lap per driver
+    if (laps?.length) {
+      const allLaps = {};
+      const lastLaps = {};
+      laps.forEach(lap => {
+        const n = lap.driver_number;
+        if (!allLaps[n]) allLaps[n] = [];
+        allLaps[n].push(lap);
+      });
+      Object.keys(allLaps).forEach(n => {
+        allLaps[n].sort((a, b) => a.lap_number - b.lap_number);
+        lastLaps[n] = allLaps[n][allLaps[n].length - 1];
+        const maxLap = lastLaps[n]?.lap_number;
+        if (maxLap) State.set('currentLap', maxLap);
+      });
+      State.set('allLaps', allLaps);
+      State.merge('lastLaps', lastLaps);
+    }
+
+    // Stints — latest per driver
+    if (stints?.length) {
+      const stintMap = {};
+      stints.forEach(s => {
+        const n = s.driver_number;
+        if (!stintMap[n] || s.stint_number > stintMap[n].stint_number) {
+          stintMap[n] = s;
+        }
+      });
+      State.set('stints', stintMap);
+    }
+
+    // Pit stops
+    if (pits?.length) {
+      const pitMap = {};
+      pits.forEach(p => {
+        if (!pitMap[p.driver_number]) pitMap[p.driver_number] = [];
+        pitMap[p.driver_number].push(p);
+      });
+      State.set('pitStops', pitMap);
+    }
+
+    // Race control
+    if (rc?.length) {
+      const sorted = [...rc].sort((a, b) => new Date(b.date) - new Date(a.date));
+      State.set('raceControl', sorted);
+      State.emit('change:raceControl', sorted);
+
+      // Set final track status from last message
+      const lastFlag = sorted.find(m => m.flag);
+      if (lastFlag?.flag === 'CHEQUERED') State.set('trackStatus', 'CHEQUERED');
+    }
+
+    // Weather — most recent sample
+    if (weather?.length) {
+      State.set('weather', weather[weather.length - 1]);
+    }
+
+    console.log('[API] Historical load complete');
+  }
+
+  return { start, stop, fetchJSON, loadHistorical };
 
 })();
