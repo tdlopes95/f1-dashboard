@@ -1,27 +1,106 @@
 // ═══════════════════════════════════════════════════════
 // api.js — OpenF1 API polling layer
 // Handles all fetch calls, rate limiting, and state updates
+//
+// BALANCING STRATEGY:
+// - Staggered boot: pollers fire 600ms apart, never all at T=0
+// - Per-poller concurrency lock: skips cycle if previous still in flight
+// - Date watermarks on ALL endpoints: only fetches new data each cycle
+// - sessionStorage snapshot: restores state on refresh, cold-start avoided
+// - carData gated on focused driver + tab visibility
+// - Intervals tuned: fast=4s, medium=12s, slow=45s
 // ═══════════════════════════════════════════════════════
 
 const API = (() => {
 
   const BASE = 'https://api.openf1.org/v1';
 
-  // Polling intervals (ms)
   const INTERVALS = {
-    fast:   3000,   // positions, intervals, car data, locations, race_control
-    medium: 8000,   // laps, stints, pit stops, overtakes
-    slow:   30000,  // weather, session info
+    fast:   4000,   // positions, intervals, race_control, locations
+    medium: 12000,  // laps, stints, pits, radio
+    slow:   45000,  // weather, overtakes
   };
 
-  let _timers = {};
-  let _running = false;
-  let _lastPositionDate = null;
-  let _lastRCDate = null;
-  let _lastCarDataDate = {};   // per driver
-  let _lastLocationDate = null;
+  // carData is special — very fast but only for focused driver
+  const CAR_DATA_INTERVAL = 2000;
 
-  // ── Core fetch with error handling ──────────────────
+  let _timers  = {};
+  let _running = false;
+
+  // Per-poller in-flight locks — prevents overlapping requests
+  const _inFlight = {};
+
+  // Date watermarks — only fetch data newer than last seen
+  let _wm = {
+    positions:  null,
+    intervals:  null,
+    raceControl:null,
+    locations:  null,
+    laps:       null,
+    radio:      null,
+  };
+
+  // ── sessionStorage snapshot ──────────────────────────
+  const SNAP_KEY = 'f1dash_state_snap';
+  const SNAP_FIELDS = [
+    'sessionKey','meetingKey','sessionName','sessionType',
+    'circuitName','sessionStartTime','sessionEndTime','sessionIsLive',
+    'drivers','positions','intervals','lastLaps','allLaps',
+    'stints','pitStops','raceControl','weather','trackStatus',
+    'currentLap','nextSessionName','nextSessionStart',
+  ];
+
+  function saveSnapshot() {
+    try {
+      const snap = {};
+      SNAP_FIELDS.forEach(k => { snap[k] = State.get(k) ?? State.raw[k]; });
+      snap._wm  = _wm;
+      snap._ts  = Date.now();
+      sessionStorage.setItem(SNAP_KEY, JSON.stringify(snap));
+    } catch(e) { /* quota exceeded — ignore */ }
+  }
+
+  function restoreSnapshot() {
+    try {
+      const raw = sessionStorage.getItem(SNAP_KEY);
+      if (!raw) return false;
+      const snap = JSON.parse(raw);
+
+      // Only restore if snapshot is <90 minutes old
+      if (Date.now() - snap._ts > 90 * 60 * 1000) {
+        sessionStorage.removeItem(SNAP_KEY);
+        return false;
+      }
+
+      // Restore state fields
+      SNAP_FIELDS.forEach(k => {
+        if (snap[k] != null) {
+          if (['drivers','positions','intervals','lastLaps','allLaps',
+               'stints','pitStops'].includes(k)) {
+            State.raw[k] = snap[k];
+          } else {
+            State.set(k, snap[k]);
+          }
+        }
+      });
+
+      // Restore watermarks
+      if (snap._wm) _wm = { ..._wm, ...snap._wm };
+
+      // Fire driversLoaded so components re-render
+      if (Object.keys(State.raw.drivers || {}).length) {
+        State.emit('driversLoaded', State.raw.drivers);
+      }
+
+      console.log('[API] Snapshot restored — age:', Math.round((Date.now() - snap._ts) / 1000), 's');
+      return true;
+    } catch(e) {
+      console.warn('[API] Snapshot restore failed:', e.message);
+      return false;
+    }
+  }
+
+  // ── Core fetch with concurrency guard ───────────────
   async function fetchJSON(endpoint, params = {}) {
     const url = new URL(`${BASE}/${endpoint}`);
     Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
@@ -33,6 +112,16 @@ const API = (() => {
       console.warn(`[API] ${endpoint} failed:`, err.message);
       return null;
     }
+  }
+
+  // Wrap a poll function with an in-flight lock
+  function guarded(name, fn) {
+    return async () => {
+      if (_inFlight[name]) return; // skip — previous still running
+      _inFlight[name] = true;
+      try { await fn(); }
+      finally { _inFlight[name] = false; }
+    };
   }
 
   // ── Session bootstrap ────────────────────────────────
@@ -49,42 +138,44 @@ const API = (() => {
     State.set('sessionStartTime',s.date_start);
     State.set('sessionEndTime',  s.date_end);
 
-    // Determine if live: started and not yet ended
     const now     = new Date();
     const started = new Date(s.date_start) <= now;
     const ended   = s.date_end && new Date(s.date_end) < now;
     State.set('sessionIsLive', started && !ended);
 
-    // Fetch next upcoming session for the countdown
     if (!started || ended) {
-      const upcoming = await fetchJSON('sessions', { session_key: 'next' }).catch(() => null);
-      if (upcoming?.length) {
-        State.set('nextSessionName',  `${upcoming[0].location} — ${upcoming[0].session_name}`);
-        State.set('nextSessionStart', upcoming[0].date_start);
-      } else {
-        // fallback: look at all sessions for this meeting
-        const all = await fetchJSON('sessions', { meeting_key: s.meeting_key }).catch(() => null);
-        const future = (all || [])
-          .filter(x => new Date(x.date_start) > now)
-          .sort((a,b) => new Date(a.date_start) - new Date(b.date_start));
-        if (future.length) {
-          State.set('nextSessionName',  `${future[0].location} — ${future[0].session_name}`);
-          State.set('nextSessionStart', future[0].date_start);
+      // Scan current + next year sessions to find the next upcoming one
+      const year = now.getFullYear();
+      let future = [];
+      for (const y of [year, year + 1]) {
+        const all = await fetchJSON('sessions', { year: y });
+        if (all?.length) {
+          future = all
+            .filter(x => new Date(x.date_start) > now)
+            .sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
+          if (future.length) break;
         }
+      }
+      if (future.length) {
+        const next = future[0];
+        State.set('nextSessionName',  `${next.location} — ${next.session_name}`);
+        State.set('nextSessionStart', next.date_start);
+      } else {
+        State.set('nextSessionName',  'Next session TBC');
+        State.set('nextSessionStart', null);
       }
     }
 
     document.getElementById('session-name').textContent = State.get('sessionName') || '–';
     document.getElementById('circuit-name').textContent = State.get('circuitName') || '–';
 
-    // Set session badge
     const badge = document.getElementById('session-type-badge');
     badge.textContent = s.session_name?.toUpperCase() || '';
     badge.className = 'badge';
     const t = (s.session_type || '').toLowerCase();
-    if (t.includes('race'))       badge.classList.add('badge--race');
-    else if (t.includes('quali')) badge.classList.add('badge--quali');
-    else if (t.includes('sprint'))badge.classList.add('badge--sprint');
+    if (t.includes('race'))        badge.classList.add('badge--race');
+    else if (t.includes('quali'))  badge.classList.add('badge--quali');
+    else if (t.includes('sprint')) badge.classList.add('badge--sprint');
     else                           badge.classList.add('badge--practice');
 
     console.log(`[API] Session loaded: ${s.session_name} (key: ${s.session_key})`);
@@ -94,7 +185,6 @@ const API = (() => {
     const sk = State.get('sessionKey');
     const data = await fetchJSON('drivers', { session_key: sk });
     if (!data?.length) return;
-
     data.forEach(d => {
       State.setDriver(d.driver_number, {
         driver_number: d.driver_number,
@@ -105,17 +195,16 @@ const API = (() => {
         headshot_url:  d.headshot_url,
       });
     });
-
     State.emit('driversLoaded', State.raw.drivers);
     console.log(`[API] Loaded ${data.length} drivers`);
   }
 
   // ── Fast polls ───────────────────────────────────────
 
-  async function pollPositions() {
+  async function _pollPositions() {
     const sk = State.get('sessionKey');
     const params = { session_key: sk };
-    if (_lastPositionDate) params['date>' ] = _lastPositionDate;
+    if (_wm.positions) params['date>'] = _wm.positions;
 
     const data = await fetchJSON('position', params);
     if (!data?.length) return;
@@ -125,19 +214,18 @@ const API = (() => {
       const cur = State.raw.positions[p.driver_number];
       if (!cur || new Date(p.date) > new Date(cur.date)) {
         updates[p.driver_number] = { position: p.position, date: p.date };
-        _lastPositionDate = p.date;
+        if (!_wm.positions || p.date > _wm.positions) _wm.positions = p.date;
       }
     });
-
-    if (Object.keys(updates).length) {
-      State.merge('positions', updates);
-      State.set('lastUpdated', { ...State.get('lastUpdated'), positions: Date.now() });
-    }
+    if (Object.keys(updates).length) State.merge('positions', updates);
   }
 
-  async function pollIntervals() {
+  async function _pollIntervals() {
     const sk = State.get('sessionKey');
-    const data = await fetchJSON('intervals', { session_key: sk });
+    const params = { session_key: sk };
+    if (_wm.intervals) params['date>'] = _wm.intervals;
+
+    const data = await fetchJSON('intervals', params);
     if (!data?.length) return;
 
     const updates = {};
@@ -147,125 +235,133 @@ const API = (() => {
         interval:      i.interval,
         date:          i.date,
       };
+      if (!_wm.intervals || i.date > _wm.intervals) _wm.intervals = i.date;
     });
-    State.merge('intervals', updates);
+    if (Object.keys(updates).length) State.merge('intervals', updates);
   }
 
-  async function pollCarData() {
+  async function _pollCarData() {
     const focused = State.get('focusedDriver');
     if (!focused) return;
 
-    const sk = State.get('sessionKey');
-    const lastDate = _lastCarDataDate[focused];
+    // Skip if tab not visible — saves requests while user is elsewhere
+    if (document.hidden) return;
+
+    const sk     = State.get('sessionKey');
+    const lastDate = (_wm.carData || {})[focused];
     const params   = { session_key: sk, driver_number: focused };
     if (lastDate) params['date>'] = lastDate;
 
     const data = await fetchJSON('car_data', params);
     if (!data?.length) return;
 
-    // Take the latest sample
     const latest = data[data.length - 1];
-    _lastCarDataDate[focused] = latest.date;
+    if (!_wm.carData) _wm.carData = {};
+    _wm.carData[focused] = latest.date;
 
     State.merge('carData', { [focused]: latest });
   }
 
-  async function pollLocations() {
+  async function _pollLocations() {
     const sk = State.get('sessionKey');
     const params = { session_key: sk };
-    if (_lastLocationDate) params['date>'] = _lastLocationDate;
+    if (_wm.locations) params['date>'] = _wm.locations;
 
     const data = await fetchJSON('location', params);
     if (!data?.length) return;
 
-    // Keep only latest per driver
     const updates = {};
     data.forEach(l => {
-      if (!updates[l.driver_number] || new Date(l.date) > new Date(updates[l.driver_number].date)) {
+      if (!updates[l.driver_number] || l.date > updates[l.driver_number].date) {
         updates[l.driver_number] = { x: l.x, y: l.y, z: l.z, date: l.date };
-        _lastLocationDate = l.date;
+        if (!_wm.locations || l.date > _wm.locations) _wm.locations = l.date;
       }
     });
-    State.merge('locations', updates);
+    if (Object.keys(updates).length) State.merge('locations', updates);
   }
 
-  async function pollRaceControl() {
+  async function _pollRaceControl() {
     const sk = State.get('sessionKey');
     const params = { session_key: sk };
-    if (_lastRCDate) params['date>'] = _lastRCDate;
+    if (_wm.raceControl) params['date>'] = _wm.raceControl;
 
     const data = await fetchJSON('race_control', params);
     if (!data?.length) return;
 
     data.forEach(msg => {
       State.pushRaceControl(msg);
-      _lastRCDate = msg.date;
+      if (!_wm.raceControl || msg.date > _wm.raceControl) _wm.raceControl = msg.date;
 
-      // Update track status from flags/SC messages
-      const cat  = (msg.category  || '').toLowerCase();
-      const flag = (msg.flag      || '').toUpperCase();
-      const txt  = (msg.message   || '').toUpperCase();
+      const flag = (msg.flag    || '').toUpperCase();
+      const txt  = (msg.message || '').toUpperCase();
 
-      if (flag === 'RED' || txt.includes('RED FLAG'))              State.set('trackStatus', 'RED');
-      else if (txt.includes('SAFETY CAR DEPLOYED'))                State.set('trackStatus', 'SC');
-      else if (txt.includes('VIRTUAL SAFETY CAR DEPLOYED'))        State.set('trackStatus', 'VSC');
+      if (flag === 'RED' || txt.includes('RED FLAG'))                State.set('trackStatus', 'RED');
+      else if (txt.includes('SAFETY CAR DEPLOYED'))                  State.set('trackStatus', 'SC');
+      else if (txt.includes('VIRTUAL SAFETY CAR DEPLOYED'))          State.set('trackStatus', 'VSC');
       else if (txt.includes('SAFETY CAR IN THIS LAP') ||
-               txt.includes('VIRTUAL SAFETY CAR ENDING'))          State.set('trackStatus', 'GREEN');
-      else if (flag === 'GREEN' || txt.includes('GREEN FLAG'))     State.set('trackStatus', 'GREEN');
-      else if (flag === 'YELLOW' || flag === 'DOUBLE YELLOW')      State.set('trackStatus', 'YELLOW');
-      else if (flag === 'CHEQUERED')                               State.set('trackStatus', 'CHEQUERED');
+               txt.includes('VIRTUAL SAFETY CAR ENDING'))            State.set('trackStatus', 'GREEN');
+      else if (flag === 'GREEN' || txt.includes('GREEN FLAG'))       State.set('trackStatus', 'GREEN');
+      else if (flag === 'YELLOW' || flag === 'DOUBLE YELLOW')        State.set('trackStatus', 'YELLOW');
+      else if (flag === 'CHEQUERED')                                 State.set('trackStatus', 'CHEQUERED');
     });
   }
 
   // ── Medium polls ─────────────────────────────────────
 
-  async function pollLaps() {
+  async function _pollLaps() {
     const sk = State.get('sessionKey');
-    const data = await fetchJSON('laps', { session_key: sk });
+    const params = { session_key: sk };
+    if (_wm.laps) params['date>'] = _wm.laps;
+
+    const data = await fetchJSON('laps', params);
     if (!data?.length) return;
 
-    const allLaps = {};
-    const lastLaps = {};
+    // Merge into existing allLaps rather than replacing
+    const allLaps  = { ...State.raw.allLaps  } || {};
+    const lastLaps = { ...State.raw.lastLaps } || {};
 
     data.forEach(lap => {
       const n = lap.driver_number;
       if (!allLaps[n]) allLaps[n] = [];
-      allLaps[n].push(lap);
+
+      // Avoid duplicates
+      const exists = allLaps[n].some(l => l.lap_number === lap.lap_number);
+      if (!exists) allLaps[n].push(lap);
+
+      // Update last lap
+      if (!lastLaps[n] || lap.lap_number > lastLaps[n].lap_number) {
+        lastLaps[n] = lap;
+        if (lap.lap_number > (State.get('currentLap') || 0)) {
+          State.set('currentLap', lap.lap_number);
+        }
+      }
+
+      if (!_wm.laps || lap.date_start > _wm.laps) _wm.laps = lap.date_start;
     });
 
-    // Sort and keep last lap
+    // Sort each driver's laps by lap number
     Object.keys(allLaps).forEach(n => {
       allLaps[n].sort((a, b) => a.lap_number - b.lap_number);
-      lastLaps[n] = allLaps[n][allLaps[n].length - 1];
-
-      // Track max lap for lap counter
-      const maxLap = lastLaps[n]?.lap_number;
-      if (maxLap && (!State.raw.currentLap || maxLap > State.raw.currentLap)) {
-        State.set('currentLap', maxLap);
-      }
     });
 
     State.set('allLaps',  allLaps);
     State.merge('lastLaps', lastLaps);
   }
 
-  async function pollStints() {
+  async function _pollStints() {
     const sk = State.get('sessionKey');
     const data = await fetchJSON('stints', { session_key: sk });
     if (!data?.length) return;
 
-    // Keep current (latest) stint per driver
     const stints = {};
     data.forEach(s => {
       const n = s.driver_number;
-      if (!stints[n] || s.stint_number > stints[n].stint_number) {
-        stints[n] = s;
-      }
+      if (!stints[n] || s.stint_number > stints[n].stint_number) stints[n] = s;
     });
     State.set('stints', stints);
   }
 
-  async function pollPits() {
+  async function _pollPits() {
     const sk = State.get('sessionKey');
     const data = await fetchJSON('pit', { session_key: sk });
     if (!data?.length) return;
@@ -278,119 +374,130 @@ const API = (() => {
     State.set('pitStops', pits);
   }
 
-  async function pollOvertakes() {
-    const sk = State.get('sessionKey');
-    const data = await fetchJSON('overtakes', { session_key: sk });
-    if (data?.length) State.set('overtakes', data);
-  }
-
-  // ── Slow polls ───────────────────────────────────────
-
-  async function pollWeather() {
-    const sk = State.get('sessionKey');
-    const data = await fetchJSON('weather', { session_key: sk });
-    if (!data?.length) return;
-    // Take most recent
-    const latest = data[data.length - 1];
-    State.set('weather', latest);
-  }
-
-
-  // ── Team radio ───────────────────────────────────────
-  let _lastRadioDate = null;
-
-  async function pollTeamRadio() {
+  async function _pollTeamRadio() {
     const sk = State.get('sessionKey');
     const params = { session_key: sk };
-    if (_lastRadioDate) params['date>'] = _lastRadioDate;
+    if (_wm.radio) params['date>'] = _wm.radio;
 
     const data = await fetchJSON('team_radio', params);
     if (!data?.length) return;
 
     data.forEach(clip => {
-      // Only emit truly new clips (not on first load dump)
-      const isNew = _lastRadioDate !== null;
-      _lastRadioDate = clip.date;
+      const isNew = _wm.radio !== null;
+      if (!_wm.radio || clip.date > _wm.radio) _wm.radio = clip.date;
       if (isNew) State.emit('newRadioClip', clip);
     });
-
-    // On first load, just set the date watermark silently
-    if (!_lastRadioDate && data.length) {
-      _lastRadioDate = data[data.length - 1].date;
-    }
   }
 
-  // ── Scheduler ────────────────────────────────────────
+  // ── Slow polls ───────────────────────────────────────
 
-  function scheduleRepeat(fn, interval, name) {
-    fn(); // run immediately
-    _timers[name] = setInterval(fn, interval);
+  async function _pollWeather() {
+    const sk = State.get('sessionKey');
+    const data = await fetchJSON('weather', { session_key: sk });
+    if (!data?.length) return;
+    State.set('weather', data[data.length - 1]);
   }
 
+  async function _pollOvertakes() {
+    const sk = State.get('sessionKey');
+    const data = await fetchJSON('overtakes', { session_key: sk });
+    if (data?.length) State.set('overtakes', data);
+  }
+
+  // ── Staggered scheduler ──────────────────────────────
+  // Fires fn() after `delayMs`, then every `interval`
+  // Each poller is wrapped in a concurrency guard
+  function schedule(name, fn, interval, delayMs = 0) {
+    const locked = guarded(name, fn);
+    const timer = setTimeout(() => {
+      locked(); // first fire after stagger delay
+      _timers[name] = setInterval(locked, interval);
+    }, delayMs);
+    _timers[`${name}_init`] = timer;
+  }
+
+  // ── Boot sequence ────────────────────────────────────
   function start() {
     if (_running) return;
     _running = true;
 
     (async () => {
+      // 1. Try to restore from sessionStorage — avoids cold-start data loss on refresh
+      const restored = restoreSnapshot();
+
+      // 2. Load session metadata (always fresh)
       await loadSession();
 
-      // If no live session, hand off to EventTimer — don't start polls
+      // 3. Check if session is live
       if (!State.get('sessionIsLive')) {
         console.log('[API] No live session — polling suppressed');
         _running = false;
         return;
       }
 
-      await loadDrivers();
-      await pollLaps();
-      await pollStints();
-      await pollPits();
-      await pollWeather();
+      // 4. Initial data load — sequential to avoid thundering herd
+      //    Skip if we just restored a fresh snapshot
+      if (!restored) {
+        await loadDrivers();
+        await _pollLaps();
+        await _pollStints();
+        await _pollPits();
+        await _pollWeather();
+      } else {
+        // Still refresh drivers in case team colours changed
+        loadDrivers();
+      }
 
-      // Fast polls (live data only)
-      scheduleRepeat(pollPositions,   INTERVALS.fast,   'positions');
-      scheduleRepeat(pollIntervals,   INTERVALS.fast,   'intervals');
-      scheduleRepeat(pollCarData,     INTERVALS.fast,   'carData');
-      scheduleRepeat(pollLocations,   INTERVALS.fast,   'locations');
-      scheduleRepeat(pollRaceControl, INTERVALS.fast,   'raceControl');
+      // 5. Start pollers staggered — 600ms between each
+      //    Fast tier: positions, intervals, race control, locations, car data
+      schedule('positions',   _pollPositions,   INTERVALS.fast,       0);
+      schedule('intervals',   _pollIntervals,   INTERVALS.fast,     600);
+      schedule('raceControl', _pollRaceControl, INTERVALS.fast,    1200);
+      schedule('locations',   _pollLocations,   INTERVALS.fast,    1800);
+      schedule('carData',     _pollCarData,     CAR_DATA_INTERVAL, 2400);
 
-      // Medium polls
-      scheduleRepeat(pollLaps,        INTERVALS.medium, 'laps');
-      scheduleRepeat(pollStints,      INTERVALS.medium, 'stints');
-      scheduleRepeat(pollPits,        INTERVALS.medium, 'pits');
-      scheduleRepeat(pollOvertakes,   INTERVALS.medium, 'overtakes');
-      scheduleRepeat(pollTeamRadio,   INTERVALS.medium, 'teamRadio');
+      //    Medium tier: laps, stints, pits, radio
+      schedule('laps',        _pollLaps,        INTERVALS.medium,  3000);
+      schedule('stints',      _pollStints,      INTERVALS.medium,  4000);
+      schedule('pits',        _pollPits,        INTERVALS.medium,  5000);
+      schedule('radio',       _pollTeamRadio,   INTERVALS.medium,  6000);
 
-      // Slow polls
-      scheduleRepeat(pollWeather,     INTERVALS.slow,   'weather');
+      //    Slow tier: weather, overtakes
+      schedule('weather',     _pollWeather,     INTERVALS.slow,    7000);
+      schedule('overtakes',   _pollOvertakes,   INTERVALS.slow,    8000);
 
-      console.log('[API] All pollers started — session is live');
+      // 6. Snapshot state every 15s
+      _timers['snapshot'] = setInterval(saveSnapshot, 15_000);
+
+      console.log('[API] All pollers started (staggered) — session is live');
     })();
   }
 
   function stop() {
-    Object.values(_timers).forEach(clearInterval);
+    Object.values(_timers).forEach(t => { clearTimeout(t); clearInterval(t); });
     _timers = {};
     _running = false;
+    // Save one final snapshot before stopping
+    saveSnapshot();
   }
 
-
-  // ── Historical load (past sessions — fetch once, no polling) ──
+  // ── Historical load (past sessions) ─────────────────
   async function loadHistorical(sessionKey) {
     console.log('[API] Loading historical session:', sessionKey);
 
-    // Load in parallel where possible
-    const [drivers, laps, stints, pits, positions, rc, weather] = await Promise.all([
-      fetchJSON('drivers',      { session_key: sessionKey }),
-      fetchJSON('laps',         { session_key: sessionKey }),
-      fetchJSON('stints',       { session_key: sessionKey }),
-      fetchJSON('pit',          { session_key: sessionKey }),
+    // Sequential to avoid hammering — drivers first, then rest in two batches
+    const drivers = await fetchJSON('drivers', { session_key: sessionKey });
+    const [laps, stints, pits] = await Promise.all([
+      fetchJSON('laps',    { session_key: sessionKey }),
+      fetchJSON('stints',  { session_key: sessionKey }),
+      fetchJSON('pit',     { session_key: sessionKey }),
+    ]);
+    const [positions, rc, weather] = await Promise.all([
       fetchJSON('position',     { session_key: sessionKey }),
       fetchJSON('race_control', { session_key: sessionKey }),
       fetchJSON('weather',      { session_key: sessionKey }),
     ]);
 
-    // Drivers
     if (drivers?.length) {
       drivers.forEach(d => {
         State.setDriver(d.driver_number, {
@@ -405,13 +512,11 @@ const API = (() => {
       State.emit('driversLoaded', State.raw.drivers);
     }
 
-    // Positions — keep only final position per driver
     if (positions?.length) {
       const finalPos = {};
       positions.forEach(p => {
-        if (!finalPos[p.driver_number] || new Date(p.date) > new Date(finalPos[p.driver_number].date)) {
+        if (!finalPos[p.driver_number] || p.date > finalPos[p.driver_number].date)
           finalPos[p.driver_number] = p;
-        }
       });
       const posMap = {};
       Object.values(finalPos).forEach(p => {
@@ -420,10 +525,8 @@ const API = (() => {
       State.merge('positions', posMap);
     }
 
-    // Laps — all laps + last lap per driver
     if (laps?.length) {
-      const allLaps = {};
-      const lastLaps = {};
+      const allLaps = {}, lastLaps = {};
       laps.forEach(lap => {
         const n = lap.driver_number;
         if (!allLaps[n]) allLaps[n] = [];
@@ -439,19 +542,15 @@ const API = (() => {
       State.merge('lastLaps', lastLaps);
     }
 
-    // Stints — latest per driver
     if (stints?.length) {
       const stintMap = {};
       stints.forEach(s => {
         const n = s.driver_number;
-        if (!stintMap[n] || s.stint_number > stintMap[n].stint_number) {
-          stintMap[n] = s;
-        }
+        if (!stintMap[n] || s.stint_number > stintMap[n].stint_number) stintMap[n] = s;
       });
       State.set('stints', stintMap);
     }
 
-    // Pit stops
     if (pits?.length) {
       const pitMap = {};
       pits.forEach(p => {
@@ -461,26 +560,21 @@ const API = (() => {
       State.set('pitStops', pitMap);
     }
 
-    // Race control
     if (rc?.length) {
       const sorted = [...rc].sort((a, b) => new Date(b.date) - new Date(a.date));
       State.set('raceControl', sorted);
       State.emit('change:raceControl', sorted);
-
-      // Set final track status from last message
       const lastFlag = sorted.find(m => m.flag);
       if (lastFlag?.flag === 'CHEQUERED') State.set('trackStatus', 'CHEQUERED');
     }
 
-    // Weather — most recent sample
-    if (weather?.length) {
-      State.set('weather', weather[weather.length - 1]);
-    }
+    if (weather?.length) State.set('weather', weather[weather.length - 1]);
 
     console.log('[API] Historical load complete');
   }
 
   function isSessionLive() { return !!State.get('sessionIsLive'); }
+
   return { start, stop, fetchJSON, loadHistorical, isSessionLive };
 
 })();

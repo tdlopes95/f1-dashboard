@@ -144,8 +144,11 @@ const EventTimer = (() => {
   function init() {
     // Wait for API to load session info, then decide
     State.on('change:sessionIsLive', val => {
+      // Only activate when explicitly false (not live)
+      // 'historical' = browsing past session — overlay should stay hidden
+      // null/undefined = not yet determined — wait
       if (val === false) activate();
-      else               deactivate();
+      else if (val)      deactivate(); // true or 'historical' — hide overlay
     });
 
     // Also update the next session label dynamically

@@ -242,8 +242,24 @@ const SessionPicker = (() => {
         ${isLiveSession ? '<span class="sp-session-check">✓ LOADED</span>' : ''}
       `;
 
-      if (isPast || isLive) {
+      if (isLive) {
+        // Actually live — load into dashboard normally
         item.addEventListener('click', () => loadSession(s));
+      } else if (isPast) {
+        // Past session — navigate to replay page
+        item.addEventListener('click', () => {
+          const meetingName = encodeURIComponent(
+            document.querySelector('.sp-sessions-gp-name')?.textContent || ''
+          );
+          const sessionLabel = encodeURIComponent(s.session_name || '');
+          window.location.href =
+            `replay.html?season=${s.year || new Date(s.date_start).getFullYear()}` +
+            `&round=${s.meeting_key}` +
+            `&session_key=${s.session_key}` +
+            `&name=${meetingName}` +
+            `&session=${sessionLabel}` +
+            `&source=openf1`;
+        });
       }
 
       sessionsList.appendChild(item);
@@ -290,23 +306,42 @@ const SessionPicker = (() => {
       { name: 'Race',         type: 'Race',        available: !!race },
     ];
 
-    if (matched) {
-      // Load actual OpenF1 sessions for this meeting
-      loadSessionsForMeeting(matched.meeting_key, race.raceName);
-    } else {
-      // Fallback: show what Jolpika knows, note OpenF1 data may be limited
-      sessions.forEach(s => {
-        const item = document.createElement('div');
-        item.className = 'sp-session-item' + (!s.available ? ' sp-session-item--upcoming' : '');
-        item.innerHTML = `
-          <span class="sp-session-type-badge ${getTypeBadgeClass(s.type)}">${s.name}</span>
-          <span class="sp-session-meta">
-            <span class="sp-session-date">${race.date}</span>
-          </span>
-          <span class="sp-source-badge">HIS</span>
-        `;
-        sessionsList.appendChild(item);
+    // Build session items — clicking navigates to replay.html
+    // Jolpica sessions always use season/round params
+    sessions.forEach(s => {
+      if (!s.available) return; // skip unavailable
+
+      const item = document.createElement('div');
+      item.className = 'sp-session-item';
+      item.innerHTML = `
+        <span class="sp-session-type-badge ${getTypeBadgeClass(s.type)}">${s.name}</span>
+        <span class="sp-session-meta">
+          <span class="sp-session-date">${race.date}</span>
+        </span>
+        <span class="sp-source-badge">HIS</span>
+      `;
+
+      item.addEventListener('click', () => {
+        const meetingName = encodeURIComponent(race.raceName || meetingName);
+        const sessionLabel = encodeURIComponent(s.name);
+        window.location.href =
+          `replay.html?season=${season}` +
+          `&round=${round}` +
+          `&name=${meetingName}` +
+          `&session=${sessionLabel}` +
+          `&source=jolpika`;
       });
+
+      sessionsList.appendChild(item);
+    });
+
+    // If we also have an OpenF1 match, still use Jolpika as primary
+    // (OpenF1 historical data is unreliable for older sessions)
+    if (matched) {
+      const note = document.createElement('div');
+      note.style.cssText = 'padding:6px 12px;font-size:9px;color:var(--text-dim);font-family:var(--font-display);letter-spacing:1px';
+      note.textContent = 'DATA: JOLPICA ERGAST';
+      sessionsList.appendChild(note);
     }
   }
 
@@ -337,6 +372,9 @@ const SessionPicker = (() => {
     // Stop live polling, reset state, load new session
     API.stop();
     resetState();
+
+    // Mark as historical — prevents EventTimer from re-activating
+    State.set('sessionIsLive', 'historical');
 
     State.set('sessionKey',  session.session_key);
     State.set('meetingKey',  session.meeting_key);
@@ -373,30 +411,35 @@ const SessionPicker = (() => {
     resetState();
     _isLive = true;
 
+    // Clear historical flag so EventTimer can re-evaluate properly
+    State.set('sessionIsLive', null);
+
     liveIndicator.classList.remove('live-indicator--replay');
     liveIndicator.innerHTML = '<span class="live-dot"></span>LIVE';
     currentLabel.textContent = 'LIVE — latest session';
 
-    API.start();
+    API.start(); // will set sessionIsLive=true or false after loadSession
     close();
   }
 
   // ── Reset all data state ─────────────────────────────
   function resetState() {
-    State.set('drivers',    {});
-    State.set('positions',  {});
-    State.set('intervals',  {});
-    State.set('lastLaps',   {});
-    State.set('allLaps',    {});
-    State.set('stints',     {});
-    State.set('pitStops',   {});
-    State.set('carData',    {});
-    State.set('locations',  {});
-    State.set('raceControl',[]);
-    State.set('weather',    null);
-    State.set('trackStatus','GREEN');
-    State.set('focusedDriver', null);
-    State.set('currentLap', null);
+    // Note: do NOT reset sessionIsLive here — callers set it explicitly
+    // to avoid triggering the EventTimer overlay incorrectly
+    State.raw.drivers   = {};
+    State.raw.positions = {};
+    State.raw.intervals = {};
+    State.raw.lastLaps  = {};
+    State.raw.allLaps   = {};
+    State.raw.stints    = {};
+    State.raw.pitStops  = {};
+    State.raw.carData   = {};
+    State.raw.locations = {};
+    State.set('raceControl',  []);
+    State.set('weather',      null);
+    State.set('trackStatus',  'GREEN');
+    State.set('focusedDriver',null);
+    State.set('currentLap',   null);
   }
 
   // ── Init ─────────────────────────────────────────────
