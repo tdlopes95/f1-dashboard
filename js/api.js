@@ -40,6 +40,12 @@ const API = (() => {
     radio:      null,
   };
 
+  // ── Debug log — delegates to shared DBG module ─────
+  function dbg(msg, level = 'info') {
+    console.log(`[API] ${msg}`);
+    DBG.log('API', msg, level);
+  }
+
   // ── sessionStorage snapshot ──────────────────────────
   const SNAP_KEY = 'f1dash_state_snap';
   const SNAP_FIELDS = [
@@ -60,7 +66,7 @@ const API = (() => {
     } catch(e) { /* quota exceeded — ignore */ }
   }
 
-  function restoreSnapshot() {
+  function restoreSnapshot(expectedSessionKey) {
     try {
       const raw = sessionStorage.getItem(SNAP_KEY);
       if (!raw) return false;
@@ -68,6 +74,13 @@ const API = (() => {
 
       // Only restore if snapshot is <90 minutes old
       if (Date.now() - snap._ts > 90 * 60 * 1000) {
+        sessionStorage.removeItem(SNAP_KEY);
+        return false;
+      }
+
+      // Only restore if snapshot is for the same session — prevents stale data poisoning
+      if (expectedSessionKey && snap.sessionKey !== expectedSessionKey) {
+        console.log('[API] Snapshot session mismatch — discarding');
         sessionStorage.removeItem(SNAP_KEY);
         return false;
       }
@@ -109,7 +122,7 @@ const API = (() => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
-      console.warn(`[API] ${endpoint} failed:`, err.message);
+      dbg(`FETCH FAILED: ${endpoint} — ${err.message}`, 'error');
       return null;
     }
   }
@@ -126,9 +139,40 @@ const API = (() => {
 
   // ── Session bootstrap ────────────────────────────────
   async function loadSession() {
-    const sessions = await fetchJSON('sessions', { session_key: 'latest' });
-    if (!sessions?.length) return;
-    const s = sessions[0];
+    // Avoid session_key:'latest' — prone to 401 on OpenF1 free tier.
+    // Instead: fetch all sessions for the current year, find the most recent one.
+    const now = new Date();
+    const year = now.getFullYear();
+
+    dbg(`fetching sessions for ${year}...`);
+    let allSessions = await fetchJSON('sessions', { year });
+
+    // If current year returns nothing, try previous year (early in season)
+    if (!allSessions?.length) {
+      dbg(`no sessions for ${year}, trying ${year - 1}...`, 'warn');
+      allSessions = await fetchJSON('sessions', { year: year - 1 });
+    }
+
+    if (!allSessions?.length) {
+      dbg('sessions API returned nothing — check network/CORS', 'error');
+      State.set('sessionIsLive', false);
+      return;
+    }
+
+    // Sort by date descending — most recent first
+    allSessions.sort((a, b) => new Date(b.date_start) - new Date(a.date_start));
+
+    // Find a currently live session first
+    let s = allSessions.find(x => {
+      const started = new Date(x.date_start) <= now;
+      const ended   = x.date_end ? new Date(x.date_end) < now : false;
+      return started && !ended;
+    });
+
+    // Fallback: most recent past session
+    if (!s) s = allSessions[0];
+
+    dbg(`picked session: ${s.session_name} (${s.date_start})`);
 
     State.set('sessionKey',      s.session_key);
     State.set('meetingKey',      s.meeting_key);
@@ -138,12 +182,16 @@ const API = (() => {
     State.set('sessionStartTime',s.date_start);
     State.set('sessionEndTime',  s.date_end);
 
-    const now     = new Date();
-    const started = new Date(s.date_start) <= now;
-    const ended   = s.date_end && new Date(s.date_end) < now;
-    State.set('sessionIsLive', started && !ended);
+    let   started = new Date(s.date_start) <= now;
+    // date_end is often null for practice/quali — treat null as not-yet-ended
+    const ended   = s.date_end ? new Date(s.date_end) < now : false;
+    let   isLive  = started && !ended;
 
-    if (!started || ended) {
+    // (live detection already done above by scanning all year sessions)
+
+    State.set('sessionIsLive', isLive);
+
+    if (!isLive) {
       // Scan current + next year sessions to find the next upcoming one
       const year = now.getFullYear();
       let future = [];
@@ -178,7 +226,7 @@ const API = (() => {
     else if (t.includes('sprint')) badge.classList.add('badge--sprint');
     else                           badge.classList.add('badge--practice');
 
-    console.log(`[API] Session loaded: ${s.session_name} (key: ${s.session_key})`);
+    dbg(`session: ${s.session_name} key=${s.session_key} live=${State.get("sessionIsLive")} start=${s.date_start} end=${s.date_end || "null"}`);
   }
 
   async function loadDrivers() {
@@ -196,7 +244,7 @@ const API = (() => {
       });
     });
     State.emit('driversLoaded', State.raw.drivers);
-    console.log(`[API] Loaded ${data.length} drivers`);
+    dbg(`drivers loaded: ${data.length}`);
   }
 
   // ── Fast polls ───────────────────────────────────────
@@ -422,21 +470,37 @@ const API = (() => {
     _running = true;
 
     (async () => {
-      // 1. Try to restore from sessionStorage — avoids cold-start data loss on refresh
-      const restored = restoreSnapshot();
+      // 1. Try MultiViewer first — best live data source, no rate limits
+      dbg('boot: trying MultiViewer local API...');
+      const mvOk = await MV.start();
 
-      // 2. Load session metadata (always fresh)
+      if (mvOk) {
+        // MV is handling everything — OpenF1 pollers not needed
+        dbg('boot: MultiViewer active ✓ — OpenF1 pollers suppressed');
+        _running = false; // MV runs its own loop
+        return;
+      }
+
+      // 2. MV not available — fall back to OpenF1
+      dbg('boot: MultiViewer unavailable, trying OpenF1...', 'warn');
       await loadSession();
 
-      // 3. Check if session is live
-      if (!State.get('sessionIsLive')) {
-        console.log('[API] No live session — polling suppressed');
+      const isLiveVal = State.get('sessionIsLive');
+      if (!isLiveVal) {
+        if (isLiveVal === undefined) {
+          dbg('OpenF1 also failed — check network/CORS', 'error');
+        } else {
+          dbg(`no live session — isLive=${isLiveVal}`, 'warn');
+        }
         _running = false;
         return;
       }
 
-      // 4. Initial data load — sequential to avoid thundering herd
-      //    Skip if we just restored a fresh snapshot
+      // 3. Snapshot restore (OpenF1 path only)
+      const currentKey = State.get('sessionKey');
+      dbg(`OpenF1 session key: ${currentKey}`);
+      const restored = restoreSnapshot(currentKey);
+
       if (!restored) {
         await loadDrivers();
         await _pollLaps();
@@ -444,32 +508,26 @@ const API = (() => {
         await _pollPits();
         await _pollWeather();
       } else {
-        // Still refresh drivers in case team colours changed
-        loadDrivers();
+        await loadDrivers();
       }
 
-      // 5. Start pollers staggered — 600ms between each
-      //    Fast tier: positions, intervals, race control, locations, car data
+      // 4. Start OpenF1 pollers (staggered)
       schedule('positions',   _pollPositions,   INTERVALS.fast,       0);
       schedule('intervals',   _pollIntervals,   INTERVALS.fast,     600);
       schedule('raceControl', _pollRaceControl, INTERVALS.fast,    1200);
       schedule('locations',   _pollLocations,   INTERVALS.fast,    1800);
       schedule('carData',     _pollCarData,     CAR_DATA_INTERVAL, 2400);
-
-      //    Medium tier: laps, stints, pits, radio
       schedule('laps',        _pollLaps,        INTERVALS.medium,  3000);
       schedule('stints',      _pollStints,      INTERVALS.medium,  4000);
       schedule('pits',        _pollPits,        INTERVALS.medium,  5000);
       schedule('radio',       _pollTeamRadio,   INTERVALS.medium,  6000);
-
-      //    Slow tier: weather, overtakes
       schedule('weather',     _pollWeather,     INTERVALS.slow,    7000);
       schedule('overtakes',   _pollOvertakes,   INTERVALS.slow,    8000);
 
-      // 6. Snapshot state every 15s
       _timers['snapshot'] = setInterval(saveSnapshot, 15_000);
-
-      console.log('[API] All pollers started (staggered) — session is live');
+      DBG.setSource('openf1');
+      setTimeout(() => DBG.autoHide(), 3000);
+      dbg('OpenF1 pollers started ✓');
     })();
   }
 

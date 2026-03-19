@@ -209,6 +209,33 @@ body::before {
   50%       { opacity: 0.4; transform: scale(0.8); }
 }
 
+/* ── Data source badge ──────────────────────────────── */
+.data-source-badge {
+  display: none; /* hidden until source is known */
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-bright);
+  padding: 3px 9px 3px 7px;
+  border-radius: 2px;
+  cursor: default;
+}
+.data-source-badge.visible { display: flex; }
+.data-source-badge.source--mv    { color: #39ff6f; border-color: rgba(57,255,111,0.35); }
+.data-source-badge.source--openf1{ color: #ff8c00; border-color: rgba(255,140,0,0.35); }
+
+.ds-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 5px currentColor;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
 /* ── Main Grid ──────────────────────────────────────── */
 #main-grid {
   position: fixed;
